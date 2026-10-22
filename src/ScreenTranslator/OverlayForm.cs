@@ -27,6 +27,7 @@ namespace ScreenTranslator
         private const float MinFontPx = 11f;
         private const float MaxFontPx = 64f;
         private const int PeekDelayMs = 280;
+        private const double BoldStrokeRatio = 0.13;
 
         private const TextFormatFlags TextFlags =
             TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix | TextFormatFlags.TextBoxControl | TextFormatFlags.NoPadding;
@@ -43,6 +44,9 @@ namespace ScreenTranslator
             public Font Font;
             public Color Back;
             public Color Fore;
+            public TextFormatFlags Flags;
+            public bool Bold;
+            public double Stroke;
         }
 
         private readonly Rectangle _region;
@@ -148,6 +152,11 @@ namespace ScreenTranslator
             }
         }
 
+        /// <summary>Self-test only: how each paragraph was styled.</summary>
+        internal string DescribePatches() => string.Join("\r\n", _patches.Select(p =>
+            "    [" + (p.Bold ? "bold" : "regular") + " stroke=" + p.Stroke.ToString("0.000") + " font=" +
+            p.Font.Size.ToString("0.0") + "px] " + p.Block.Text));
+
         /// <summary>Self-test only: show the original of one paragraph with its first word hovered.</summary>
         internal void PreviewOriginal(int patchIndex)
         {
@@ -161,7 +170,6 @@ namespace ScreenTranslator
 
         private void BuildPatches(List<TextBlock> blocks)
         {
-            var flags = TextFlags | DirectionFlags;
             var imageBounds = new Rectangle(0, 0, _image.Width, _image.Height);
             int prevBottom = int.MinValue;
             int maxBottom = _region.Height;
@@ -188,18 +196,37 @@ namespace ScreenTranslator
                 }
                 rect = ClampHorizontally(rect, _region.Width);
 
+                // Labels and buttons (one line) are centred on the original; paragraphs follow the
+                // reading direction.
+                bool singleLine = block.Lines.Count == 1;
+                if (singleLine)
+                {
+                    int centre = source.Left + source.Width / 2;
+                    rect.X = Math.Max(0, Math.Min(_region.Width - rect.Width, centre - rect.Width / 2));
+                }
+                var flags = TextFlags | (singleLine
+                    ? TextFormatFlags.HorizontalCenter | (Config.TargetIsRightToLeft ? TextFormatFlags.RightToLeft : 0)
+                    : DirectionFlags);
+
+                _pixels.SampleColors(Rectangle.Round(block.Bounds), out var back, out var fore);
+                if (back.ToArgb() == TransparentKey.ToArgb()) back = Color.FromArgb(254, 0, 254);
+                double stroke = _pixels.StrokeRatio(Rectangle.Round(block.Bounds), back, block.AverageLineHeight);
+                bool bold = stroke >= BoldStrokeRatio;
+
                 int nextTop = i + 1 < blocks.Count ? (int)blocks[i + 1].Bounds.Top - 3 : _region.Height;
                 int available = Math.Max(rect.Height, nextTop - rect.Top);
 
                 // Start near the original text size and shrink until the translation fits.
-                float px = Clamp(block.AverageLineHeight * 0.92f, MinFontPx, MaxFontPx);
+                // OCR line boxes are a little shorter than the font size, and Arabic letters look
+                // smaller than Latin ones at the same size, so start slightly larger.
+                float px = Clamp(block.AverageLineHeight * 1.05f, MinFontPx, MaxFontPx);
                 Font font = null;
                 Size measured;
                 int textWidth = Math.Max(20, rect.Width - 2 * PadX);
                 while (true)
                 {
                     font?.Dispose();
-                    font = new Font(Config.OverlayFontFamily, px, FontStyle.Regular, GraphicsUnit.Pixel);
+                    font = new Font(Config.OverlayFontFamily, px, bold ? FontStyle.Bold : FontStyle.Regular, GraphicsUnit.Pixel);
                     measured = TextRenderer.MeasureText(block.Translation, font, new Size(textWidth, int.MaxValue), flags);
                     if (measured.Height + 2 * PadY <= available || px <= MinFontPx) break;
                     px = Math.Max(MinFontPx, px - 1f);
@@ -211,9 +238,6 @@ namespace ScreenTranslator
                 prevBottom = rect.Bottom;
                 maxBottom = Math.Max(maxBottom, rect.Bottom);
 
-                _pixels.SampleColors(Rectangle.Round(block.Bounds), out var back, out var fore);
-                if (back.ToArgb() == TransparentKey.ToArgb()) back = Color.FromArgb(254, 0, 254);
-
                 _patches.Add(new Patch
                 {
                     Block = block,
@@ -223,7 +247,10 @@ namespace ScreenTranslator
                     Text = block.Translation,
                     Font = font,
                     Back = back,
-                    Fore = fore
+                    Fore = fore,
+                    Flags = flags,
+                    Bold = bold,
+                    Stroke = stroke
                 });
             }
 
@@ -270,7 +297,7 @@ namespace ScreenTranslator
                         if (p == _peekPatch) continue;
                         using (var brush = new SolidBrush(p.Back))
                             g.FillRectangle(brush, p.Rect);
-                        TextRenderer.DrawText(g, p.Text, p.Font, p.TextRect, p.Fore, TextFlags | DirectionFlags);
+                        TextRenderer.DrawText(g, p.Text, p.Font, p.TextRect, p.Fore, p.Flags);
                     }
                     if (_peekPatch != null) DrawOriginal(g, _peekPatch);
                     break;
@@ -562,6 +589,38 @@ namespace ScreenTranslator
                         if (ContrastRatio(candidate, back) >= 3.0) fore = candidate;
                     }
                 }
+            }
+
+            /// <summary>
+            /// Typical stroke thickness of the text relative to its line height: the median length
+            /// of horizontal runs of "ink" pixels. Bold text has noticeably thicker strokes.
+            /// </summary>
+            public double StrokeRatio(Rectangle text, Color back, float lineHeight)
+            {
+                var inner = Rectangle.Intersect(text, new Rectangle(0, 0, _w, _h));
+                if (inner.Width < 4 || inner.Height < 4 || lineHeight < 4) return 0;
+
+                int maxDist = 0;
+                for (int y = inner.Top; y < inner.Bottom; y++)
+                    for (int x = inner.Left; x < inner.Right; x++)
+                        maxDist = Math.Max(maxDist, Distance(At(x, y), back));
+                if (maxDist < 120) return 0;
+
+                int threshold = maxDist / 2;
+                var runs = new List<int>();
+                for (int y = inner.Top; y < inner.Bottom; y++)
+                {
+                    int run = 0;
+                    for (int x = inner.Left; x < inner.Right; x++)
+                    {
+                        if (Distance(At(x, y), back) >= threshold) run++;
+                        else if (run > 0) { runs.Add(run); run = 0; }
+                    }
+                    if (run > 0) runs.Add(run);
+                }
+                if (runs.Count == 0) return 0;
+                runs.Sort();
+                return runs[runs.Count / 2] / (double)lineHeight;
             }
 
             private static int Distance(Color a, Color b) =>

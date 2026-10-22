@@ -106,6 +106,7 @@ namespace ScreenTranslator
                 using (var overlay = new OverlayForm(new Rectangle(0, 0, page.Width, page.Height), page))
                 {
                     overlay.ShowTranslation(blocks);
+                    report.AppendLine(overlay.DescribePatches());
                     SaveComposite(page, overlay, Path.Combine(dir, "2-overlay-translation.png"));
                     overlay.PreviewOriginal(1);
                     SaveComposite(page, overlay, Path.Combine(dir, "3-overlay-hover-original.png"));
@@ -118,6 +119,7 @@ namespace ScreenTranslator
             using (var popup = new TextPopup(text, new Point(80, 80)))
             {
                 popup.SetTranslation(Translator.TranslateAsync(text).GetAwaiter().GetResult());
+                popup.PreviewHover("difference");
                 SaveForm(popup, Path.Combine(dir, "4-selected-text-popup.png"));
             }
 

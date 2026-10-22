@@ -68,6 +68,13 @@ namespace ScreenTranslator
             NativeMethods.SetForegroundWindow(Handle);
         }
 
+        /// <summary>Self-test only: show <paramref name="word"/> as hovered.</summary>
+        internal void PreviewHover(string word)
+        {
+            _hoverWord = _flow.Items.Find(i => i.Lookup == word);
+            Invalidate();
+        }
+
         // ---------- layout ----------
 
         private string TopText => _error ?? _translation ?? "جاري الترجمة…";
@@ -140,7 +147,7 @@ namespace ScreenTranslator
             using (var pen = new Pen(Theme.Border, Math.Max(1f, S)))
                 g.DrawLine(pen, P(18), _dividerY - _scroll, Width - P(18), _dividerY - _scroll);
 
-            _flow.Draw(g, _originalFont, Theme.Dim, Theme.Accent, _hoverWord, -_scroll, Math.Max(1, P(1.5f)));
+            _flow.Draw(g, _originalFont, Theme.Dim, Theme.Accent, Theme.Back, _hoverWord, -_scroll, Math.Max(1, P(1.5f)));
 
             g.ResetClip();
 

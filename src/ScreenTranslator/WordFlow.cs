@@ -6,7 +6,9 @@ using System.Windows.Forms;
 namespace ScreenTranslator
 {
     /// <summary>
-    /// Lays out English text word by word so every word can be hovered and clicked.
+    /// Lays out English text so every word can be hovered and clicked.
+    /// Each line is drawn as one string (natural spacing); word positions are found by
+    /// measuring the text before them, so hit-testing matches what is on screen.
     /// </summary>
     internal sealed class WordFlow
     {
@@ -17,46 +19,78 @@ namespace ScreenTranslator
             public Rectangle Rect;
         }
 
+        private sealed class Line
+        {
+            public string Text;
+            public Point Origin;
+        }
+
         private const TextFormatFlags Flags = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine;
 
         public readonly List<Item> Items = new List<Item>();
+        private readonly List<Line> _lines = new List<Line>();
         public int Height;
+
+        private static int Width(string s, Font font) =>
+            s.Length == 0 ? 0 : TextRenderer.MeasureText(s, font, new Size(int.MaxValue, int.MaxValue), Flags).Width;
 
         public static WordFlow Build(string text, Font font, int left, int top, int maxWidth, int lineGap)
         {
             var flow = new WordFlow();
-            int space = TextRenderer.MeasureText("a a", font, Size.Empty, Flags).Width
-                        - TextRenderer.MeasureText("aa", font, Size.Empty, Flags).Width;
-            int lineHeight = TextRenderer.MeasureText("Ag", font, Size.Empty, Flags).Height;
+            int lineHeight = TextRenderer.MeasureText("Ag", font, new Size(int.MaxValue, int.MaxValue), Flags).Height;
+            int y = top;
+            bool first = true;
 
-            int x = left, y = top;
-            bool lineHasWords = false;
-            var lines = text.Replace("\r\n", "\n").Split('\n');
-            for (int li = 0; li < lines.Length; li++)
+            foreach (string paragraph in text.Replace("\r\n", "\n").Split('\n'))
             {
-                if (li > 0)
+                var words = paragraph.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+                if (words.Length == 0)
                 {
-                    // An empty line marks a paragraph: leave a little extra room.
-                    y += lineHasWords ? lineHeight + lineGap : lineHeight / 2;
-                    x = left;
-                    lineHasWords = false;
+                    if (!first) y += lineHeight / 2; // blank line = paragraph gap
+                    continue;
                 }
 
-                foreach (string token in lines[li].Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries))
+                var current = new List<string>();
+                foreach (string word in words)
                 {
-                    int w = TextRenderer.MeasureText(token, font, Size.Empty, Flags).Width;
-                    if (lineHasWords && x + w > left + maxWidth)
+                    if (current.Count > 0 && Width(string.Join(" ", current) + " " + word, font) > maxWidth)
                     {
-                        x = left;
-                        y += lineHeight + lineGap;
+                        if (!first) y += lineGap;
+                        flow.AddLine(current, font, left, y, lineHeight);
+                        y += lineHeight;
+                        first = false;
+                        current.Clear();
                     }
-                    flow.Items.Add(new Item { Text = token, Lookup = CleanWord(token), Rect = new Rectangle(x, y, w, lineHeight) });
-                    x += w + space;
-                    lineHasWords = true;
+                    current.Add(word);
                 }
+                if (!first) y += lineGap;
+                flow.AddLine(current, font, left, y, lineHeight);
+                y += lineHeight;
+                first = false;
             }
-            flow.Height = (lineHasWords ? y + lineHeight : y) - top;
+
+            flow.Height = y - top;
             return flow;
+        }
+
+        private void AddLine(List<string> words, Font font, int left, int y, int lineHeight)
+        {
+            string lineText = string.Join(" ", words);
+            _lines.Add(new Line { Text = lineText, Origin = new Point(left, y) });
+
+            string prefix = "";
+            foreach (string word in words)
+            {
+                // Position = width of everything before the word, including the space.
+                int x = prefix.Length == 0 ? 0 : Width(prefix + " " + word, font) - Width(word, font);
+                Items.Add(new Item
+                {
+                    Text = word,
+                    Lookup = CleanWord(word),
+                    Rect = new Rectangle(left + x, y, Width(word, font), lineHeight)
+                });
+                prefix = prefix.Length == 0 ? word : prefix + " " + word;
+            }
         }
 
         public Item HitTest(Point p)
@@ -68,21 +102,22 @@ namespace ScreenTranslator
             return null;
         }
 
-        public void Draw(Graphics g, Font font, Color color, Color hoverColor, Item hover, int offsetY, int underline)
+        public void Draw(Graphics g, Font font, Color color, Color hoverColor, Color back, Item hover, int offsetY, int underline)
         {
-            foreach (var item in Items)
+            foreach (var line in _lines)
             {
-                var r = item.Rect;
-                r.Offset(0, offsetY);
-                bool isHover = item == hover;
-                TextRenderer.DrawText(g, item.Text, font, r.Location, isHover ? hoverColor : color,
-                    Flags | TextFormatFlags.PreserveGraphicsClipping);
-                if (isHover)
-                {
-                    using (var brush = new SolidBrush(hoverColor))
-                        g.FillRectangle(brush, r.Left, r.Bottom - underline, r.Width, underline);
-                }
+                var origin = new Point(line.Origin.X, line.Origin.Y + offsetY);
+                TextRenderer.DrawText(g, line.Text, font, origin, color, Flags | TextFormatFlags.PreserveGraphicsClipping);
             }
+
+            if (hover == null) return;
+            var r = hover.Rect;
+            r.Offset(0, offsetY);
+            using (var bg = new SolidBrush(back))
+                g.FillRectangle(bg, Rectangle.Inflate(r, 1, 0));
+            TextRenderer.DrawText(g, hover.Text, font, r.Location, hoverColor, Flags | TextFormatFlags.PreserveGraphicsClipping);
+            using (var brush = new SolidBrush(hoverColor))
+                g.FillRectangle(brush, r.Left, r.Bottom - underline, r.Width, underline);
         }
 
         /// <summary>"translator," → "translator"; "Hello!" → "hello"; "—" → null.</summary>

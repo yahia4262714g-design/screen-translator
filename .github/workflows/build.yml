@@ -64,5 +64,5 @@ jobs:
           $tag = "v1.0.${{ github.run_number }}"
           gh release create $tag ScreenTranslator.zip out\ScreenTranslator.exe `
             --title "مترجم الشاشة $tag" `
-            --notes "نزّل ScreenTranslator.exe وشغّله. الاختصار: Ctrl + Alt + T" `
+            --notes "نزّل ScreenTranslator.exe وشغّله. Ctrl + Alt + C لترجمة النص المحدد، Ctrl + Alt + T لترجمة منطقة من الشاشة." `
             --latest
