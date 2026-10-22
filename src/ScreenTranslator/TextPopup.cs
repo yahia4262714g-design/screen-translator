@@ -17,7 +17,7 @@ namespace ScreenTranslator
         private readonly string _original;
         private readonly Point _anchor;
         private readonly Font _translationFont, _originalFont, _hintFont;
-        private readonly IconButton _speak, _copy;
+        private readonly IconButton _speak, _copy, _close;
 
         private string _translation;
         private string _error;
@@ -39,8 +39,10 @@ namespace ScreenTranslator
 
             _speak = new IconButton { Glyph = Theme.IconSpeaker, Click = () => Speech.Speak(_original) };
             _copy = new IconButton { Glyph = Theme.IconCopy, Click = CopyTranslation };
+            _close = new IconButton { Glyph = "\uE711", Click = Close };
             Buttons.Add(_speak);
             Buttons.Add(_copy);
+            Buttons.Add(_close);
 
             Relayout();
         }
@@ -61,11 +63,14 @@ namespace ScreenTranslator
             Invalidate();
         }
 
-        protected override void OnShown(EventArgs e)
+        // Never takes focus, so a full-screen game or app stays in front.
+        protected override bool NoActivate => true;
+
+        /// <summary>Esc: closes the word card first, then the popup.</summary>
+        public void HandleEscape()
         {
-            base.OnShown(e);
-            Activate();
-            NativeMethods.SetForegroundWindow(Handle);
+            if (_card != null && !_card.IsDisposed) CloseCard();
+            else Close();
         }
 
         /// <summary>Self-test only: show <paramref name="word"/> as hovered.</summary>
@@ -92,8 +97,11 @@ namespace ScreenTranslator
             int inner = width - 2 * pad;
 
             int y = pad;
-            var size = TextRenderer.MeasureText(TopText, _translationFont, new Size(inner, int.MaxValue), Rtl);
-            _translationRect = new Rectangle(pad, y, inner, size.Height);
+            int textWidth = inner - P(24); // room for ✕ in the corner
+            var size = TextRenderer.MeasureText(TopText, _translationFont, new Size(textWidth, int.MaxValue), Rtl);
+            _translationRect = new Rectangle(pad, y, textWidth, size.Height);
+            int closeSize = P(28);
+            _close.Rect = new Rectangle(width - closeSize - P(6), P(6), closeSize, closeSize);
             y += size.Height + P(14);
 
             _dividerY = y;
@@ -233,27 +241,6 @@ namespace ScreenTranslator
             try { Clipboard.SetText(_translation); } catch (System.Runtime.InteropServices.ExternalException) { }
             _copy.Glyph = Theme.IconCheck;
             Invalidate(_copy.Rect);
-        }
-
-        protected override void OnKeyDown(KeyEventArgs e)
-        {
-            if (e.KeyCode == Keys.Escape)
-            {
-                if (_card != null && !_card.IsDisposed) CloseCard();
-                else Close();
-            }
-            else if (e.Control && e.KeyCode == Keys.C)
-            {
-                CopyTranslation();
-            }
-            base.OnKeyDown(e);
-        }
-
-        protected override void OnDeactivate(EventArgs e)
-        {
-            base.OnDeactivate(e);
-            // Clicking anywhere outside closes the card (the word card never takes focus).
-            BeginInvoke(new Action(() => { if (!IsDisposed && Form.ActiveForm == null) Close(); }));
         }
 
         protected override void Dispose(bool disposing)

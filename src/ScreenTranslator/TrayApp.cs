@@ -16,6 +16,8 @@ namespace ScreenTranslator
         private const string RunValue = "ScreenTranslator";
         private const int RegionHotkeyId = 1;
         private const int SelectionHotkeyId = 2;
+        private const int EscapeHotkeyId = 3;
+        private static readonly Hotkey EscapeKey = new Hotkey(false, false, false, false, Keys.Escape);
 
         private readonly NotifyIcon _tray;
         private readonly HotkeyWindow _hotkeys;
@@ -25,6 +27,8 @@ namespace ScreenTranslator
         private OverlayForm _overlay;
         private TextPopup _popup;
         private WordsForm _wordsForm;
+        private SelectionForm _selector;
+        private MessageToast _hint;
 
         public TrayApp()
         {
@@ -56,6 +60,7 @@ namespace ScreenTranslator
             {
                 if (id == RegionHotkeyId) StartRegionTranslation();
                 else if (id == SelectionHotkeyId) StartSelectionTranslation();
+                else if (id == EscapeHotkeyId) OnEscape();
             };
 
             bool regionOk = _hotkeys.Register(RegionHotkeyId, Config.RegionHotkey);
@@ -83,6 +88,29 @@ namespace ScreenTranslator
             if (_popup != null && !_popup.IsDisposed) _popup.Close();
             _overlay = null;
             _popup = null;
+            UpdateEscapeKey();
+        }
+
+        // ---------- Esc ----------
+        // Our windows never take focus (so games stay in front), which means they never see the
+        // keyboard. Esc is therefore claimed globally, but only while something of ours is open.
+
+        private bool OverlayOpen => _overlay != null && !_overlay.IsDisposed;
+        private bool PopupOpen => _popup != null && !_popup.IsDisposed;
+
+        private void UpdateEscapeKey()
+        {
+            bool needed = _selector != null || OverlayOpen || PopupOpen;
+            if (needed && !_hotkeys.IsRegistered(EscapeHotkeyId)) _hotkeys.Register(EscapeHotkeyId, EscapeKey);
+            else if (!needed) _hotkeys.Unregister(EscapeHotkeyId);
+        }
+
+        private void OnEscape()
+        {
+            if (_selector != null) _selector.Cancel();
+            else if (OverlayOpen) _overlay.HandleEscape();
+            else if (PopupOpen) _popup.HandleEscape();
+            UpdateEscapeKey();
         }
 
         // ---------- Ctrl+Alt+C: highlighted text ----------
@@ -115,8 +143,9 @@ namespace ScreenTranslator
             text = SelectedText.Normalize(text);
             var popup = new TextPopup(text, anchor);
             _popup = popup;
-            popup.FormClosed += (s, e) => { if (_popup == popup) _popup = null; };
+            popup.FormClosed += (s, e) => { if (_popup == popup) _popup = null; UpdateEscapeKey(); };
             popup.Show();
+            UpdateEscapeKey();
 
             try
             {
@@ -143,25 +172,16 @@ namespace ScreenTranslator
             Bitmap image;
             try
             {
-                if ((_overlay != null && !_overlay.IsDisposed) || (_popup != null && !_popup.IsDisposed))
-                {
-                    CloseOpenWindows();
-                    await Task.Delay(80); // let them vanish before the screenshot
-                }
+                if (OverlayOpen || PopupOpen) CloseOpenWindows();
 
-                var bounds = SystemInformation.VirtualScreen;
-                using (var screen = new Bitmap(bounds.Width, bounds.Height, PixelFormat.Format32bppArgb))
-                {
-                    using (var g = Graphics.FromImage(screen))
-                        g.CopyFromScreen(bounds.Location, Point.Empty, bounds.Size, CopyPixelOperation.SourceCopy);
+                var chosen = await ChooseAreaAsync();
+                if (chosen == null) return;
+                region = chosen.Value;
 
-                    using (var selector = new SelectionForm(screen, bounds))
-                    {
-                        if (selector.ShowDialog() != DialogResult.OK) return;
-                        region = selector.SelectedScreenRect;
-                        image = selector.SelectedImage;
-                    }
-                }
+                await Task.Delay(60); // let the selection layer disappear before capturing
+                image = new Bitmap(region.Width, region.Height, PixelFormat.Format32bppArgb);
+                using (var g = Graphics.FromImage(image))
+                    g.CopyFromScreen(region.Location, Point.Empty, region.Size, CopyPixelOperation.SourceCopy);
             }
             catch (Exception ex)
             {
@@ -179,8 +199,10 @@ namespace ScreenTranslator
             {
                 if (_overlay == overlay) _overlay = null;
                 image.Dispose();
+                UpdateEscapeKey();
             };
             overlay.Show();
+            UpdateEscapeKey();
 
             try
             {
@@ -207,6 +229,33 @@ namespace ScreenTranslator
             {
                 overlay.ShowMessage("صار خطأ: " + ex.Message, autoClose: false);
             }
+        }
+
+        /// <summary>Lets the user drag a rectangle over the live screen; null when cancelled.</summary>
+        private Task<Rectangle?> ChooseAreaAsync()
+        {
+            var done = new TaskCompletionSource<Rectangle?>();
+            var selector = new SelectionForm(SystemInformation.VirtualScreen);
+            selector.Completed += r => done.TrySetResult(r);
+            selector.Cancelled += () => done.TrySetResult(null);
+            _selector = selector;
+            selector.Show();
+
+            var primary = Screen.PrimaryScreen.Bounds;
+            _hint = new MessageToast("حدّد المنطقة اللي بدك تترجمها  •  Esc أو كليك يمين للإلغاء", new Point(primary.Left, primary.Top + 20));
+            _hint.Left = primary.Left + (primary.Width - _hint.Width) / 2;
+            _hint.Show();
+            UpdateEscapeKey();
+
+            return done.Task.ContinueWith(t =>
+            {
+                _selector = null;
+                selector.Close();
+                if (_hint != null && !_hint.IsDisposed) _hint.Close();
+                _hint = null;
+                UpdateEscapeKey();
+                return t.Result;
+            }, TaskScheduler.FromCurrentSynchronizationContext());
         }
 
         // ---------- tray menu ----------

@@ -62,6 +62,13 @@ namespace ScreenTranslator
             return ok;
         }
 
+        public void Unregister(int id)
+        {
+            if (_registered.Remove(id)) NativeMethods.UnregisterHotKey(Handle, id);
+        }
+
+        public bool IsRegistered(int id) => _registered.Contains(id);
+
         protected override void WndProc(ref Message m)
         {
             if (m.Msg == NativeMethods.WM_HOTKEY)

@@ -67,6 +67,7 @@ namespace ScreenTranslator
         private Patch _hoverPatch, _peekPatch;
         private OcrWordBox _hoverWord;
         private WordCard _card;
+        private bool _closeHover;
 
         public OverlayForm(Rectangle screenRegion, Bitmap regionImage)
         {
@@ -108,16 +109,50 @@ namespace ScreenTranslator
             {
                 var cp = base.CreateParams;
                 cp.ExStyle |= NativeMethods.WS_EX_TOOLWINDOW; // keep it out of Alt+Tab
+                cp.ExStyle |= NativeMethods.WS_EX_NOACTIVATE; // never steal focus: games stay in front
                 return cp;
             }
         }
+
+        protected override bool ShowWithoutActivation => true;
 
         protected override void OnShown(EventArgs e)
         {
             base.OnShown(e);
             Bounds = _region;
-            Activate();
-            NativeMethods.SetForegroundWindow(Handle);
+        }
+
+        /// <summary>Esc: closes the word card first, then the translation.</summary>
+        public void HandleEscape()
+        {
+            if (CardOpen) CloseCard();
+            else Close();
+        }
+
+        private Rectangle CloseButtonRect
+        {
+            get
+            {
+                int size = (int)Math.Round(26 * _scale);
+                return new Rectangle(ClientSize.Width - size - 4, 4, size, size);
+            }
+        }
+
+        private void DrawCloseButton(Graphics g)
+        {
+            var r = CloseButtonRect;
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            using (var bg = new SolidBrush(_closeHover ? Color.FromArgb(196, 43, 28) : Color.FromArgb(24, 26, 32)))
+                g.FillEllipse(bg, r);
+            using (var border = new Pen(Color.FromArgb(120, 255, 255, 255), 1f))
+                g.DrawEllipse(border, r);
+            int inset = r.Width / 3;
+            using (var pen = new Pen(Color.White, Math.Max(1.5f, 1.6f * _scale)))
+            {
+                g.DrawLine(pen, r.Left + inset, r.Top + inset, r.Right - inset, r.Bottom - inset);
+                g.DrawLine(pen, r.Right - inset, r.Top + inset, r.Left + inset, r.Bottom - inset);
+            }
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.None;
         }
 
         // ---------- public API ----------
@@ -285,6 +320,8 @@ namespace ScreenTranslator
         {
             var g = e.Graphics;
             g.Clear(TransparentKey);
+            // The selected area stays frozen while the translation is shown.
+            g.DrawImageUnscaled(_image, 0, 0);
 
             switch (_mode)
             {
@@ -309,6 +346,7 @@ namespace ScreenTranslator
                     DrawPill(g, _message, topRight: false);
                     break;
             }
+            DrawCloseButton(g);
         }
 
         /// <summary>Shows the captured original pixels of one patch, with the hovered word underlined.</summary>
@@ -345,7 +383,7 @@ namespace ScreenTranslator
                 int padX = (int)(14 * _scale), padY = (int)(8 * _scale);
                 int w = size.Width + 2 * padX, h = size.Height + 2 * padY;
 
-                int x = topRight ? ClientSize.Width - w - 6 : (ClientSize.Width - w) / 2;
+                int x = topRight ? CloseButtonRect.Left - w - 6 : (ClientSize.Width - w) / 2;
                 int y = topRight ? 6 : Math.Max(4, (ClientSize.Height - h) / 2);
                 var pill = new Rectangle(Math.Max(0, x), y, w, h);
 
@@ -393,6 +431,18 @@ namespace ScreenTranslator
         protected override void OnMouseMove(MouseEventArgs e)
         {
             base.OnMouseMove(e);
+            bool overClose = CloseButtonRect.Contains(e.Location);
+            if (overClose != _closeHover)
+            {
+                _closeHover = overClose;
+                Invalidate(Rectangle.Inflate(CloseButtonRect, 2, 2));
+            }
+            if (overClose)
+            {
+                Cursor = Cursors.Hand;
+                return;
+            }
+            Cursor = Cursors.Default;
             if (_mode != Mode.Result) return;
 
             // Ignore the mouse until it actually moves, so the original doesn't flash up
@@ -425,6 +475,11 @@ namespace ScreenTranslator
         protected override void OnMouseLeave(EventArgs e)
         {
             base.OnMouseLeave(e);
+            if (_closeHover)
+            {
+                _closeHover = false;
+                Invalidate(Rectangle.Inflate(CloseButtonRect, 2, 2));
+            }
             _peekTimer.Stop();
             _hoverPatch = null;
             if (!CardOpen) SetPeek(null);
@@ -435,11 +490,12 @@ namespace ScreenTranslator
             base.OnMouseUp(e);
             if (e.Button != MouseButtons.Left) return;
 
-            if (_mode != Mode.Result)
+            if (CloseButtonRect.Contains(e.Location))
             {
                 Close();
                 return;
             }
+            if (_mode != Mode.Result) return;
 
             var patch = PatchAt(e.Location);
             if (patch == null) return;
@@ -486,13 +542,6 @@ namespace ScreenTranslator
                 CopyToClipboard(_translatedText);
             }
             base.OnKeyDown(e);
-        }
-
-        protected override void OnDeactivate(EventArgs e)
-        {
-            base.OnDeactivate(e);
-            // Clicking anywhere else dismisses the translation (but not while its menu is open).
-            if (!_menu.Visible) BeginInvoke(new Action(() => { if (!IsDisposed && !_menu.Visible && Form.ActiveForm != this) Close(); }));
         }
 
         private static void CopyToClipboard(string text)

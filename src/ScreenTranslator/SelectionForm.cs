@@ -1,91 +1,80 @@
 using System;
 using System.Drawing;
-using System.Drawing.Drawing2D;
-using System.Drawing.Imaging;
-using System.Drawing.Text;
 using System.Windows.Forms;
 
 namespace ScreenTranslator
 {
     /// <summary>
-    /// Full-screen frozen snapshot of every monitor where the user drags a rectangle,
-    /// like the Windows Snipping Tool.
+    /// Lightly dims the live screen while the user drags a rectangle. The screen is not frozen:
+    /// only the chosen area is captured afterwards. The window never takes focus, so a
+    /// full-screen game or app stays in front instead of minimising.
     /// </summary>
     internal sealed class SelectionForm : Form
     {
-        private static readonly Color Accent = Color.FromArgb(79, 140, 255);
+        private static readonly Color HoleKey = Color.FromArgb(255, 0, 255);
         private const int MinSize = 6;
 
-        private readonly Bitmap _screen;
-        private readonly Bitmap _dimmed;
         private readonly Rectangle _virtualBounds;
-
+        private readonly FrameForm _frame = new FrameForm();
         private Point _start;
         private Rectangle _selection;
         private bool _dragging;
+        private bool _finished;
 
-        /// <summary>The chosen area in screen coordinates.</summary>
-        public Rectangle SelectedScreenRect { get; private set; }
+        /// <summary>Raised with the chosen area in screen coordinates.</summary>
+        public event Action<Rectangle> Completed;
 
-        /// <summary>The pixels inside the chosen area (caller owns it).</summary>
-        public Bitmap SelectedImage { get; private set; }
+        public event Action Cancelled;
 
-        public SelectionForm(Bitmap screen, Rectangle virtualBounds)
+        public SelectionForm(Rectangle virtualBounds)
         {
-            _screen = screen;
             _virtualBounds = virtualBounds;
-            _dimmed = BuildDimmedBackground(screen, virtualBounds);
 
             FormBorderStyle = FormBorderStyle.None;
             StartPosition = FormStartPosition.Manual;
             ShowInTaskbar = false;
             TopMost = true;
             DoubleBuffered = true;
-            KeyPreview = true;
             Cursor = Cursors.Cross;
             AutoScaleMode = AutoScaleMode.None;
-            BackColor = Color.Black;
+            BackColor = Color.FromArgb(8, 10, 16);
+            Opacity = 0.35;
+            TransparencyKey = HoleKey; // the selected area is cut out, so it shows at full brightness
             Bounds = virtualBounds;
         }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                var cp = base.CreateParams;
+                cp.ExStyle |= NativeMethods.WS_EX_TOOLWINDOW | NativeMethods.WS_EX_NOACTIVATE;
+                return cp;
+            }
+        }
+
+        protected override bool ShowWithoutActivation => true;
 
         protected override void OnShown(EventArgs e)
         {
             base.OnShown(e);
             Bounds = _virtualBounds;
-            Activate();
-            NativeMethods.SetForegroundWindow(Handle);
+        }
+
+        public void Cancel()
+        {
+            if (_finished) return;
+            _finished = true;
+            Cancelled?.Invoke();
         }
 
         protected override void OnPaint(PaintEventArgs e)
         {
-            var g = e.Graphics;
-            var clip = e.ClipRectangle;
-            g.DrawImage(_dimmed, clip, clip, GraphicsUnit.Pixel);
-
-            if (_selection.Width <= 0 || _selection.Height <= 0) return;
-
-            g.DrawImage(_screen, _selection, _selection, GraphicsUnit.Pixel);
-
-            using (var pen = new Pen(Accent, 2f) { Alignment = PenAlignment.Outset })
-                g.DrawRectangle(pen, _selection);
-
-            DrawSizeLabel(g);
-        }
-
-        private void DrawSizeLabel(Graphics g)
-        {
-            string label = _selection.Width + " × " + _selection.Height;
-            using (var font = new Font("Segoe UI", 12f, FontStyle.Regular, GraphicsUnit.Pixel))
+            e.Graphics.Clear(BackColor);
+            if (_selection.Width > 0 && _selection.Height > 0)
             {
-                var size = TextRenderer.MeasureText(label, font);
-                int x = _selection.Left;
-                int y = _selection.Top - size.Height - 6;
-                if (y < 0) y = _selection.Top + 4;
-                var box = new Rectangle(x, y, size.Width + 8, size.Height + 2);
-                using (var bg = new SolidBrush(Color.FromArgb(220, 20, 22, 28)))
-                    g.FillRectangle(bg, box);
-                TextRenderer.DrawText(g, label, font, box, Color.White,
-                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+                using (var hole = new SolidBrush(HoleKey))
+                    e.Graphics.FillRectangle(hole, _selection);
             }
         }
 
@@ -99,6 +88,7 @@ namespace ScreenTranslator
             if (e.Button != MouseButtons.Left) return;
 
             _dragging = true;
+            Capture = true;
             _start = e.Location;
             UpdateSelection(new Rectangle(e.Location, Size.Empty));
         }
@@ -115,6 +105,7 @@ namespace ScreenTranslator
         {
             if (!_dragging || e.Button != MouseButtons.Left) return;
             _dragging = false;
+            Capture = false;
 
             if (_selection.Width < MinSize || _selection.Height < MinSize)
             {
@@ -122,91 +113,83 @@ namespace ScreenTranslator
                 return;
             }
 
-            SelectedImage = _screen.Clone(_selection, PixelFormat.Format32bppArgb);
-            SelectedScreenRect = new Rectangle(
+            if (_finished) return;
+            _finished = true;
+            var onScreen = new Rectangle(
                 _selection.X + _virtualBounds.X, _selection.Y + _virtualBounds.Y,
                 _selection.Width, _selection.Height);
-            DialogResult = DialogResult.OK;
-            Close();
-        }
-
-        protected override void OnKeyDown(KeyEventArgs e)
-        {
-            if (e.KeyCode == Keys.Escape) Cancel();
-            base.OnKeyDown(e);
-        }
-
-        private void Cancel()
-        {
-            DialogResult = DialogResult.Cancel;
-            Close();
+            Completed?.Invoke(onScreen);
         }
 
         private void UpdateSelection(Rectangle next)
         {
             var dirty = Rectangle.Union(_selection, next);
-            dirty.Inflate(4, 40);
+            dirty.Inflate(2, 2);
             _selection = next;
             Invalidate(dirty);
-        }
+            Update();
 
-        private static Bitmap BuildDimmedBackground(Bitmap screen, Rectangle virtualBounds)
-        {
-            var dimmed = new Bitmap(screen.Width, screen.Height, PixelFormat.Format32bppArgb);
-            using (var g = Graphics.FromImage(dimmed))
+            if (next.Width > 0 && next.Height > 0)
             {
-                g.DrawImageUnscaled(screen, 0, 0);
-                using (var shade = new SolidBrush(Color.FromArgb(120, 8, 10, 16)))
-                    g.FillRectangle(shade, 0, 0, screen.Width, screen.Height);
-
-                // Hint pill at the top of the primary monitor.
-                var primary = Screen.PrimaryScreen.Bounds;
-                primary.Offset(-virtualBounds.X, -virtualBounds.Y);
-                string hint = "حدّد المنطقة اللي بدك تترجمها   •   Esc للإلغاء";
-                // GDI+ text (not TextRenderer) because GDI would punch holes in a 32bpp ARGB bitmap's alpha.
-                using (var font = new Font("Segoe UI", 15f, FontStyle.Regular, GraphicsUnit.Pixel))
-                using (var format = new StringFormat(StringFormatFlags.DirectionRightToLeft | StringFormatFlags.NoWrap)
-                {
-                    Alignment = StringAlignment.Center,
-                    LineAlignment = StringAlignment.Center
-                })
-                {
-                    g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
-                    var size = Size.Ceiling(g.MeasureString(hint, font, PointF.Empty, format));
-                    var pill = new Rectangle(
-                        primary.Left + (primary.Width - size.Width - 40) / 2, primary.Top + 28,
-                        size.Width + 40, size.Height + 18);
-
-                    g.SmoothingMode = SmoothingMode.AntiAlias;
-                    using (var path = RoundedRect(pill, pill.Height / 2))
-                    using (var bg = new SolidBrush(Color.FromArgb(235, 22, 24, 30)))
-                    using (var border = new Pen(Color.FromArgb(90, Accent), 1f))
-                    {
-                        g.FillPath(bg, path);
-                        g.DrawPath(border, path);
-                    }
-                    g.DrawString(hint, font, Brushes.White, pill, format);
-                }
+                var onScreen = next;
+                onScreen.Offset(_virtualBounds.Location);
+                _frame.ShowAround(onScreen);
             }
-            return dimmed;
-        }
-
-        internal static GraphicsPath RoundedRect(Rectangle r, int radius)
-        {
-            int d = Math.Max(1, Math.Min(radius * 2, Math.Min(r.Width, r.Height)));
-            var path = new GraphicsPath();
-            path.AddArc(r.Left, r.Top, d, d, 180, 90);
-            path.AddArc(r.Right - d, r.Top, d, d, 270, 90);
-            path.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
-            path.AddArc(r.Left, r.Bottom - d, d, d, 90, 90);
-            path.CloseFigure();
-            return path;
+            else
+            {
+                _frame.Hide();
+            }
         }
 
         protected override void Dispose(bool disposing)
         {
-            if (disposing) _dimmed.Dispose();
+            if (disposing) _frame.Dispose();
             base.Dispose(disposing);
+        }
+
+        /// <summary>Crisp, fully opaque blue outline around the selection (click-through).</summary>
+        private sealed class FrameForm : Form
+        {
+            private const int Thickness = 2;
+
+            public FrameForm()
+            {
+                FormBorderStyle = FormBorderStyle.None;
+                StartPosition = FormStartPosition.Manual;
+                ShowInTaskbar = false;
+                TopMost = true;
+                AutoScaleMode = AutoScaleMode.None;
+                BackColor = Theme.Accent;
+                TransparencyKey = HoleKey;
+            }
+
+            protected override CreateParams CreateParams
+            {
+                get
+                {
+                    const int WS_EX_TRANSPARENT = 0x20;
+                    var cp = base.CreateParams;
+                    cp.ExStyle |= NativeMethods.WS_EX_TOOLWINDOW | NativeMethods.WS_EX_NOACTIVATE | WS_EX_TRANSPARENT;
+                    return cp;
+                }
+            }
+
+            protected override bool ShowWithoutActivation => true;
+
+            public void ShowAround(Rectangle selection)
+            {
+                Bounds = Rectangle.Inflate(selection, Thickness, Thickness);
+                if (!Visible) Show();
+                Invalidate();
+                Update();
+            }
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                e.Graphics.Clear(Theme.Accent);
+                using (var hole = new SolidBrush(HoleKey))
+                    e.Graphics.FillRectangle(hole, Thickness, Thickness, Width - 2 * Thickness, Height - 2 * Thickness);
+            }
         }
     }
 }
