@@ -1,0 +1,50 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: dotnet build src/ScreenTranslator/ScreenTranslator.csproj -c Release -o out
+
+      # Renders English text, reads it with Windows OCR and translates it.
+      - name: Self-test (OCR + translation)
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath out\ScreenTranslator.exe -ArgumentList '--selftest', "$pwd\selftest.txt" -Wait -PassThru
+          Get-Content selftest.txt -Encoding UTF8
+          if ($p.ExitCode -ne 0) { Write-Error "Self-test failed with exit code $($p.ExitCode)"; exit 1 }
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item out\ScreenTranslator.exe, out\ScreenTranslator.exe.config dist\
+          Compress-Archive -Path dist\* -DestinationPath ScreenTranslator.zip -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ScreenTranslator
+          path: dist/
+
+      - name: Publish release
+        if: github.event_name == 'push'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "v1.0.${{ github.run_number }}"
+          gh release create $tag ScreenTranslator.zip out\ScreenTranslator.exe `
+            --title "مترجم الشاشة $tag" `
+            --notes "نزّل ScreenTranslator.exe وشغّله. الاختصار: Ctrl + Alt + T" `
+            --latest

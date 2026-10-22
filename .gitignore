@@ -1,0 +1,8 @@
+bin/
+obj/
+out/
+dist/
+*.zip
+selftest.txt
+.vs/
+*.user
