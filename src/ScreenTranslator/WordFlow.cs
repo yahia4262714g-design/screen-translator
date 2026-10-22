@@ -78,18 +78,26 @@ namespace ScreenTranslator
             string lineText = string.Join(" ", words);
             _lines.Add(new Line { Text = lineText, Origin = new Point(left, y) });
 
+            // Start of each word = width of everything before it (including the space).
+            var starts = new int[words.Count];
             string prefix = "";
-            foreach (string word in words)
+            for (int i = 0; i < words.Count; i++)
             {
-                // Position = width of everything before the word, including the space.
-                int x = prefix.Length == 0 ? 0 : Width(prefix + " " + word, font) - Width(word, font);
+                starts[i] = prefix.Length == 0 ? 0 : Width(prefix + " " + words[i], font) - Width(words[i], font);
+                prefix = prefix.Length == 0 ? words[i] : prefix + " " + words[i];
+            }
+
+            int space = Width("a a", font) - Width("aa", font);
+            for (int i = 0; i < words.Count; i++)
+            {
+                // A word ends where the space before the next one begins.
+                int end = i + 1 < words.Count ? starts[i + 1] - space : starts[i] + Width(words[i], font);
                 Items.Add(new Item
                 {
-                    Text = word,
-                    Lookup = CleanWord(word),
-                    Rect = new Rectangle(left + x, y, Width(word, font), lineHeight)
+                    Text = words[i],
+                    Lookup = CleanWord(words[i]),
+                    Rect = new Rectangle(left + starts[i], y, Math.Max(1, end - starts[i]), lineHeight)
                 });
-                prefix = prefix.Length == 0 ? word : prefix + " " + word;
             }
         }
 
@@ -104,18 +112,28 @@ namespace ScreenTranslator
 
         public void Draw(Graphics g, Font font, Color color, Color hoverColor, Color back, Item hover, int offsetY, int underline)
         {
+            Line hoverLine = null;
             foreach (var line in _lines)
             {
                 var origin = new Point(line.Origin.X, line.Origin.Y + offsetY);
                 TextRenderer.DrawText(g, line.Text, font, origin, color, Flags | TextFormatFlags.PreserveGraphicsClipping);
+                if (hover != null && line.Origin.Y == hover.Rect.Y) hoverLine = line;
             }
 
-            if (hover == null) return;
+            if (hover == null || hoverLine == null) return;
+
+            // Redraw the same line in the accent colour, clipped to the hovered word, so the
+            // glyphs land on exactly the same pixels.
             var r = hover.Rect;
             r.Offset(0, offsetY);
+            var saved = g.Clip;
+            g.SetClip(r, System.Drawing.Drawing2D.CombineMode.Intersect);
             using (var bg = new SolidBrush(back))
-                g.FillRectangle(bg, Rectangle.Inflate(r, 1, 0));
-            TextRenderer.DrawText(g, hover.Text, font, r.Location, hoverColor, Flags | TextFormatFlags.PreserveGraphicsClipping);
+                g.FillRectangle(bg, r);
+            TextRenderer.DrawText(g, hoverLine.Text, font, new Point(hoverLine.Origin.X, hoverLine.Origin.Y + offsetY), hoverColor,
+                Flags | TextFormatFlags.PreserveGraphicsClipping);
+            g.Clip = saved;
+
             using (var brush = new SolidBrush(hoverColor))
                 g.FillRectangle(brush, r.Left, r.Bottom - underline, r.Width, underline);
         }

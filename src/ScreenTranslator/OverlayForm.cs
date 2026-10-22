@@ -213,13 +213,16 @@ namespace ScreenTranslator
                 double stroke = _pixels.StrokeRatio(Rectangle.Round(block.Bounds), back, block.AverageLineHeight);
                 bool bold = stroke >= BoldStrokeRatio;
 
-                int nextTop = i + 1 < blocks.Count ? (int)blocks[i + 1].Bounds.Top - 3 : _region.Height;
-                int available = Math.Max(rect.Height, nextTop - rect.Top);
+                // Room for the translation: about the size of the original paragraph, never running
+                // into the next one.
+                int nextTop = i + 1 < blocks.Count ? (int)blocks[i + 1].Bounds.Top : _region.Height;
+                int clearance = (int)(block.AverageLineHeight * 0.5f);
+                int available = Math.Max(rect.Height, Math.Min(nextTop - clearance - rect.Top, (int)(rect.Height * 1.25f)));
 
                 // Start near the original text size and shrink until the translation fits.
                 // OCR line boxes are a little shorter than the font size, and Arabic letters look
                 // smaller than Latin ones at the same size, so start slightly larger.
-                float px = Clamp(block.AverageLineHeight * 1.05f, MinFontPx, MaxFontPx);
+                float px = Clamp(block.AverageLineHeight * 1.0f, MinFontPx, MaxFontPx);
                 Font font = null;
                 Size measured;
                 int textWidth = Math.Max(20, rect.Width - 2 * PadX);
