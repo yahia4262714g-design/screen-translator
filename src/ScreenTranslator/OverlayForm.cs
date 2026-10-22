@@ -12,17 +12,21 @@ namespace ScreenTranslator
     /// Window placed exactly over the selected area. Each paragraph of the original text is
     /// covered by a patch in the same background colour with the translation written on it,
     /// so the translation appears "in place". Everything else stays see-through.
+    ///
+    /// Learning mode: resting the mouse on a patch shows the original English underneath;
+    /// clicking a word there opens its dictionary card.
     /// </summary>
     internal sealed class OverlayForm : Form
     {
         private static readonly Color TransparentKey = Color.FromArgb(255, 0, 255);
-        private static readonly Color Accent = Color.FromArgb(79, 140, 255);
+        private static readonly Color Accent = Theme.Accent;
         private static readonly Color PillBack = Color.FromArgb(24, 26, 32);
 
         private const int PadX = 6;
         private const int PadY = 3;
         private const float MinFontPx = 11f;
         private const float MaxFontPx = 64f;
+        private const int PeekDelayMs = 280;
 
         private const TextFormatFlags TextFlags =
             TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix | TextFormatFlags.TextBoxControl | TextFormatFlags.NoPadding;
@@ -31,7 +35,9 @@ namespace ScreenTranslator
 
         private sealed class Patch
         {
-            public Rectangle Rect;
+            public TextBlock Block;
+            public Rectangle Rect;        // where the translation is drawn
+            public Rectangle SourceRect;  // where the original text is
             public Rectangle TextRect;
             public string Text;
             public Font Font;
@@ -40,19 +46,30 @@ namespace ScreenTranslator
         }
 
         private readonly Rectangle _region;
+        private readonly Bitmap _image;
         private readonly PixelData _pixels;
         private readonly List<Patch> _patches = new List<Patch>();
         private readonly ContextMenuStrip _menu;
+        private readonly Timer _peekTimer;
+        private readonly float _scale;
         private Mode _mode = Mode.Loading;
         private string _message;
         private string _originalText = "";
         private string _translatedText = "";
         private Timer _autoClose;
 
+        private Point _cursorAtShow;
+        private bool _mouseArmed;
+        private Patch _hoverPatch, _peekPatch;
+        private OcrWordBox _hoverWord;
+        private WordCard _card;
+
         public OverlayForm(Rectangle screenRegion, Bitmap regionImage)
         {
             _region = screenRegion;
+            _image = regionImage;
             _pixels = new PixelData(regionImage);
+            _scale = Theme.ScaleAt(screenRegion.Location);
 
             FormBorderStyle = FormBorderStyle.None;
             StartPosition = FormStartPosition.Manual;
@@ -64,23 +81,29 @@ namespace ScreenTranslator
             BackColor = TransparentKey;
             TransparencyKey = TransparentKey;
             Bounds = screenRegion;
-            Cursor = Cursors.Hand;
 
             _menu = new ContextMenuStrip { RightToLeft = RightToLeft.Yes, ShowImageMargin = false };
             _menu.Items.Add("نسخ الترجمة", null, (s, e) => CopyToClipboard(_translatedText));
             _menu.Items.Add("نسخ النص الأصلي", null, (s, e) => CopyToClipboard(_originalText));
+            _menu.Items.Add("استمع للنص الأصلي", null, (s, e) => Speech.Speak(_originalText));
             _menu.Items.Add(new ToolStripSeparator());
             _menu.Items.Add("إغلاق  (Esc)", null, (s, e) => Close());
             ContextMenuStrip = _menu;
+
+            _peekTimer = new Timer { Interval = PeekDelayMs };
+            _peekTimer.Tick += (s, e) =>
+            {
+                _peekTimer.Stop();
+                SetPeek(_hoverPatch);
+            };
         }
 
         protected override CreateParams CreateParams
         {
             get
             {
-                const int WS_EX_TOOLWINDOW = 0x80;
                 var cp = base.CreateParams;
-                cp.ExStyle |= WS_EX_TOOLWINDOW; // keep it out of Alt+Tab
+                cp.ExStyle |= NativeMethods.WS_EX_TOOLWINDOW; // keep it out of Alt+Tab
                 return cp;
             }
         }
@@ -105,6 +128,8 @@ namespace ScreenTranslator
 
             BuildPatches(ordered);
             _mode = Mode.Result;
+            _cursorAtShow = Cursor.Position;
+            Cursor = Cursors.Default;
             Invalidate();
         }
 
@@ -123,11 +148,21 @@ namespace ScreenTranslator
             }
         }
 
+        /// <summary>Self-test only: show the original of one paragraph with its first word hovered.</summary>
+        internal void PreviewOriginal(int patchIndex)
+        {
+            if (patchIndex >= _patches.Count) return;
+            _peekPatch = _patches[patchIndex];
+            _hoverWord = _peekPatch.Block.Lines[0].Words.FirstOrDefault();
+            Invalidate();
+        }
+
         // ---------- layout ----------
 
         private void BuildPatches(List<TextBlock> blocks)
         {
             var flags = TextFlags | DirectionFlags;
+            var imageBounds = new Rectangle(0, 0, _image.Width, _image.Height);
             int prevBottom = int.MinValue;
             int maxBottom = _region.Height;
 
@@ -135,6 +170,10 @@ namespace ScreenTranslator
             {
                 var block = blocks[i];
                 if (string.IsNullOrWhiteSpace(block.Translation)) continue;
+
+                var source = Rectangle.Round(block.Bounds);
+                source.Inflate(4, 3);
+                source.Intersect(imageBounds);
 
                 var rect = Rectangle.Round(block.Bounds);
                 rect.Inflate(4, 3);
@@ -177,7 +216,9 @@ namespace ScreenTranslator
 
                 _patches.Add(new Patch
                 {
+                    Block = block,
                     Rect = rect,
+                    SourceRect = source,
                     TextRect = new Rectangle(rect.X + PadX, rect.Y + (rect.Height - measured.Height) / 2, textWidth, measured.Height),
                     Text = block.Translation,
                     Font = font,
@@ -226,10 +267,12 @@ namespace ScreenTranslator
                 case Mode.Result:
                     foreach (var p in _patches)
                     {
+                        if (p == _peekPatch) continue;
                         using (var brush = new SolidBrush(p.Back))
                             g.FillRectangle(brush, p.Rect);
                         TextRenderer.DrawText(g, p.Text, p.Font, p.TextRect, p.Fore, TextFlags | DirectionFlags);
                     }
+                    if (_peekPatch != null) DrawOriginal(g, _peekPatch);
                     break;
 
                 case Mode.Message:
@@ -238,15 +281,39 @@ namespace ScreenTranslator
             }
         }
 
+        /// <summary>Shows the captured original pixels of one patch, with the hovered word underlined.</summary>
+        private void DrawOriginal(Graphics g, Patch p)
+        {
+            using (var brush = new SolidBrush(p.Back))
+                g.FillRectangle(brush, p.Rect);
+            g.DrawImage(_image, p.SourceRect, p.SourceRect, GraphicsUnit.Pixel);
+
+            var frame = Rectangle.Union(p.Rect, p.SourceRect);
+            using (var pen = new Pen(Color.FromArgb(150, Accent), 1f))
+                g.DrawRectangle(pen, frame.X, frame.Y, frame.Width - 1, frame.Height - 1);
+
+            if (_hoverWord != null)
+            {
+                var r = Rectangle.Round(_hoverWord.Bounds);
+                r.Inflate(2, 1);
+                using (var fill = new SolidBrush(Color.FromArgb(55, Accent)))
+                    g.FillRectangle(fill, r);
+                int thickness = Math.Max(2, (int)Math.Round(2 * _scale));
+                using (var line = new SolidBrush(Accent))
+                    g.FillRectangle(line, r.Left, r.Bottom, r.Width, thickness);
+            }
+        }
+
         private void DrawPill(Graphics g, string text, bool topRight)
         {
             var flags = TextFormatFlags.RightToLeft | TextFormatFlags.HorizontalCenter | TextFormatFlags.WordBreak |
                         TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding;
-            using (var font = new Font(Config.OverlayFontFamily, 14f, FontStyle.Regular, GraphicsUnit.Pixel))
+            using (var font = new Font(Config.OverlayFontFamily, 14f * _scale, FontStyle.Regular, GraphicsUnit.Pixel))
             {
-                int maxWidth = Math.Max(120, Math.Min(460, ClientSize.Width - 16));
+                int maxWidth = Math.Max(120, Math.Min((int)(460 * _scale), ClientSize.Width - 16));
                 var size = TextRenderer.MeasureText(text, font, new Size(maxWidth, int.MaxValue), flags);
-                int w = size.Width + 28, h = size.Height + 16;
+                int padX = (int)(14 * _scale), padY = (int)(8 * _scale);
+                int w = size.Width + 2 * padX, h = size.Height + 2 * padY;
 
                 int x = topRight ? ClientSize.Width - w - 6 : (ClientSize.Width - w) / 2;
                 int y = topRight ? 6 : Math.Max(4, (ClientSize.Height - h) / 2);
@@ -257,23 +324,137 @@ namespace ScreenTranslator
                 using (var border = new Pen(Accent, 1f))
                     g.DrawRectangle(border, pill.X, pill.Y, pill.Width - 1, pill.Height - 1);
 
-                var textRect = new Rectangle(pill.X + 14, pill.Y + 8, size.Width, size.Height);
+                var textRect = new Rectangle(pill.X + padX, pill.Y + padY, size.Width, size.Height);
                 TextRenderer.DrawText(g, text, font, textRect, Color.White, flags);
             }
         }
 
-        // ---------- interaction ----------
+        // ---------- learning mode ----------
+
+        private Patch PatchAt(Point p)
+        {
+            for (int i = _patches.Count - 1; i >= 0; i--)
+            {
+                var patch = _patches[i];
+                if (patch.Rect.Contains(p) || (patch == _peekPatch && patch.SourceRect.Contains(p))) return patch;
+            }
+            return null;
+        }
+
+        private static OcrWordBox WordAt(Patch patch, Point p)
+        {
+            foreach (var line in patch.Block.Lines)
+                foreach (var word in line.Words)
+                    if (RectangleF.Inflate(word.Bounds, 2, 2).Contains(p) && WordFlow.CleanWord(word.Text) != null)
+                        return word;
+            return null;
+        }
+
+        private bool CardOpen => _card != null && !_card.IsDisposed;
+
+        private void SetPeek(Patch patch)
+        {
+            if (patch == _peekPatch) return;
+            _peekPatch = patch;
+            _hoverWord = null;
+            Invalidate();
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            if (_mode != Mode.Result) return;
+
+            // Ignore the mouse until it actually moves, so the original doesn't flash up
+            // just because the selection ended over a paragraph.
+            if (!_mouseArmed)
+            {
+                var c = Cursor.Position;
+                if (Math.Abs(c.X - _cursorAtShow.X) + Math.Abs(c.Y - _cursorAtShow.Y) < 8) return;
+                _mouseArmed = true;
+            }
+
+            var patch = PatchAt(e.Location);
+            if (patch != _hoverPatch)
+            {
+                _hoverPatch = patch;
+                _peekTimer.Stop();
+                if (patch != null && patch != _peekPatch) _peekTimer.Start();
+                else if (patch == null && !CardOpen) SetPeek(null);
+            }
+
+            var word = _peekPatch != null ? WordAt(_peekPatch, e.Location) : null;
+            if (word != _hoverWord)
+            {
+                _hoverWord = word;
+                Invalidate();
+            }
+            Cursor = word != null ? Cursors.Hand : Cursors.Default;
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            base.OnMouseLeave(e);
+            _peekTimer.Stop();
+            _hoverPatch = null;
+            if (!CardOpen) SetPeek(null);
+        }
 
         protected override void OnMouseUp(MouseEventArgs e)
         {
             base.OnMouseUp(e);
-            if (e.Button == MouseButtons.Left) Close();
+            if (e.Button != MouseButtons.Left) return;
+
+            if (_mode != Mode.Result)
+            {
+                Close();
+                return;
+            }
+
+            var patch = PatchAt(e.Location);
+            if (patch == null) return;
+
+            if (patch != _peekPatch)
+            {
+                _peekTimer.Stop();
+                CloseCard();
+                SetPeek(patch);
+                return;
+            }
+
+            var word = WordAt(patch, e.Location);
+            if (word == null)
+            {
+                CloseCard();
+                return;
+            }
+
+            string lookup = WordFlow.CleanWord(word.Text);
+            if (CardOpen && _card.Word == lookup) return;
+
+            CloseCard();
+            _card = new WordCard(lookup, patch.Block.Text, RectangleToScreen(Rectangle.Round(word.Bounds)));
+            _card.FormClosed += (s, a) => { if (!IsDisposed && _hoverPatch == null) SetPeek(null); };
+            _card.Show(this);
+        }
+
+        private void CloseCard()
+        {
+            if (CardOpen) _card.Close();
+            _card = null;
         }
 
         protected override void OnKeyDown(KeyEventArgs e)
         {
-            if (e.KeyCode == Keys.Escape) Close();
-            else if (e.Control && e.KeyCode == Keys.C) CopyToClipboard(_translatedText);
+            if (e.KeyCode == Keys.Escape)
+            {
+                if (CardOpen) CloseCard();
+                else Close();
+            }
+            else if (e.Control && e.KeyCode == Keys.C)
+            {
+                CopyToClipboard(_translatedText);
+            }
             base.OnKeyDown(e);
         }
 
@@ -295,6 +476,7 @@ namespace ScreenTranslator
             if (disposing)
             {
                 _autoClose?.Dispose();
+                _peekTimer.Dispose();
                 foreach (var p in _patches) p.Font.Dispose();
                 _menu.Dispose();
             }

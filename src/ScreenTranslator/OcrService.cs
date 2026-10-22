@@ -12,10 +12,17 @@ using Windows.Media.Ocr;
 
 namespace ScreenTranslator
 {
+    internal sealed class OcrWordBox
+    {
+        public RectangleF Bounds;
+        public string Text;
+    }
+
     internal sealed class OcrTextLine
     {
         public RectangleF Bounds;
         public string Text;
+        public readonly List<OcrWordBox> Words = new List<OcrWordBox>();
     }
 
     internal sealed class OcrUnavailableException : Exception
@@ -92,6 +99,7 @@ namespace ScreenTranslator
             {
                 if (line.Words.Count == 0 || string.IsNullOrWhiteSpace(line.Text)) continue;
 
+                var textLine = new OcrTextLine { Text = line.Text.Trim() };
                 float left = float.MaxValue, top = float.MaxValue, right = float.MinValue, bottom = float.MinValue;
                 foreach (var word in line.Words)
                 {
@@ -100,13 +108,15 @@ namespace ScreenTranslator
                     top = Math.Min(top, (float)r.Y);
                     right = Math.Max(right, (float)(r.X + r.Width));
                     bottom = Math.Max(bottom, (float)(r.Y + r.Height));
+                    textLine.Words.Add(new OcrWordBox
+                    {
+                        Bounds = new RectangleF((float)r.X / scale, (float)r.Y / scale, (float)r.Width / scale, (float)r.Height / scale),
+                        Text = word.Text
+                    });
                 }
 
-                lines.Add(new OcrTextLine
-                {
-                    Bounds = RectangleF.FromLTRB(left / scale, top / scale, right / scale, bottom / scale),
-                    Text = line.Text.Trim()
-                });
+                textLine.Bounds = RectangleF.FromLTRB(left / scale, top / scale, right / scale, bottom / scale);
+                lines.Add(textLine);
             }
             return lines;
         }

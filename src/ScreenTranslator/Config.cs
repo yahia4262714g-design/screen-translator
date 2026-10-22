@@ -15,13 +15,14 @@ namespace ScreenTranslator
         public const string TargetLanguage = "ar";
         public const bool TargetIsRightToLeft = true;
 
-        // Global shortcut: Ctrl + Alt + T
-        public static readonly bool HotkeyCtrl = true;
-        public static readonly bool HotkeyAlt = true;
-        public static readonly bool HotkeyShift = false;
-        public static readonly bool HotkeyWin = false;
-        public const Keys HotkeyKey = Keys.T;
-        public const string HotkeyText = "Ctrl + Alt + T";
+        // Ctrl + Alt + T: select an area of the screen and translate it in place.
+        public static readonly Hotkey RegionHotkey = new Hotkey(ctrl: true, alt: true, shift: false, win: false, key: Keys.T);
+
+        // Ctrl + Alt + C: translate the text you have highlighted (no screenshot).
+        public static readonly Hotkey SelectionHotkey = new Hotkey(ctrl: true, alt: true, shift: false, win: false, key: Keys.C);
+
+        // Longest highlighted text sent for translation.
+        public const int MaxSelectionLength = 4500;
 
         public const string AppName = "Screen Translator";
         public const string AppNameArabic = "مترجم الشاشة";

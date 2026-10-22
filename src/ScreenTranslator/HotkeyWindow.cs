@@ -1,42 +1,72 @@
 using System;
+using System.Collections.Generic;
 using System.Windows.Forms;
 
 namespace ScreenTranslator
 {
+    internal sealed class Hotkey
+    {
+        public readonly bool Ctrl, Alt, Shift, Win;
+        public readonly Keys Key;
+
+        public Hotkey(bool ctrl, bool alt, bool shift, bool win, Keys key)
+        {
+            Ctrl = ctrl; Alt = alt; Shift = shift; Win = win; Key = key;
+        }
+
+        public uint Modifiers
+        {
+            get
+            {
+                uint m = NativeMethods.MOD_NOREPEAT;
+                if (Ctrl) m |= NativeMethods.MOD_CONTROL;
+                if (Alt) m |= NativeMethods.MOD_ALT;
+                if (Shift) m |= NativeMethods.MOD_SHIFT;
+                if (Win) m |= NativeMethods.MOD_WIN;
+                return m;
+            }
+        }
+
+        public override string ToString()
+        {
+            var parts = new List<string>();
+            if (Ctrl) parts.Add("Ctrl");
+            if (Alt) parts.Add("Alt");
+            if (Shift) parts.Add("Shift");
+            if (Win) parts.Add("Win");
+            parts.Add(Key.ToString());
+            return string.Join(" + ", parts);
+        }
+    }
+
     /// <summary>
-    /// Invisible message-only window that owns the global shortcut.
+    /// Invisible message-only window that owns the global shortcuts.
     /// </summary>
     internal sealed class HotkeyWindow : NativeWindow, IDisposable
     {
-        private const int HotkeyId = 0x5354; // "ST"
         private static readonly IntPtr HWND_MESSAGE = new IntPtr(-3);
+        private readonly List<int> _registered = new List<int>();
 
-        private bool _registered;
-
-        public event EventHandler Pressed;
+        /// <summary>Raised with the id passed to <see cref="Register"/>.</summary>
+        public event Action<int> Pressed;
 
         public HotkeyWindow()
         {
             CreateHandle(new CreateParams { Parent = HWND_MESSAGE });
         }
 
-        public bool Register()
+        public bool Register(int id, Hotkey hotkey)
         {
-            uint modifiers = NativeMethods.MOD_NOREPEAT;
-            if (Config.HotkeyCtrl) modifiers |= NativeMethods.MOD_CONTROL;
-            if (Config.HotkeyAlt) modifiers |= NativeMethods.MOD_ALT;
-            if (Config.HotkeyShift) modifiers |= NativeMethods.MOD_SHIFT;
-            if (Config.HotkeyWin) modifiers |= NativeMethods.MOD_WIN;
-
-            _registered = NativeMethods.RegisterHotKey(Handle, HotkeyId, modifiers, (uint)Config.HotkeyKey);
-            return _registered;
+            bool ok = NativeMethods.RegisterHotKey(Handle, id, hotkey.Modifiers, (uint)hotkey.Key);
+            if (ok) _registered.Add(id);
+            return ok;
         }
 
         protected override void WndProc(ref Message m)
         {
-            if (m.Msg == NativeMethods.WM_HOTKEY && m.WParam.ToInt32() == HotkeyId)
+            if (m.Msg == NativeMethods.WM_HOTKEY)
             {
-                Pressed?.Invoke(this, EventArgs.Empty);
+                Pressed?.Invoke(m.WParam.ToInt32());
                 return;
             }
             base.WndProc(ref m);
@@ -44,11 +74,8 @@ namespace ScreenTranslator
 
         public void Dispose()
         {
-            if (_registered)
-            {
-                NativeMethods.UnregisterHotKey(Handle, HotkeyId);
-                _registered = false;
-            }
+            foreach (int id in _registered) NativeMethods.UnregisterHotKey(Handle, id);
+            _registered.Clear();
             DestroyHandle();
         }
     }

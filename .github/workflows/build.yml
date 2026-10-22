@@ -17,13 +17,31 @@ jobs:
       - name: Build
         run: dotnet build src/ScreenTranslator/ScreenTranslator.csproj -c Release -o out
 
-      # Renders English text, reads it with Windows OCR and translates it.
-      - name: Self-test (OCR + translation)
+      # OCR, translation, dictionary and text clean-up checks, plus PNG previews of the UI.
+      - name: Self-test
         shell: pwsh
         run: |
-          $p = Start-Process -FilePath out\ScreenTranslator.exe -ArgumentList '--selftest', "$pwd\selftest.txt" -Wait -PassThru
+          $p = Start-Process -FilePath out\ScreenTranslator.exe -ArgumentList '--selftest', "$pwd\selftest.txt", "$pwd\previews" -Wait -PassThru
           Get-Content selftest.txt -Encoding UTF8
           if ($p.ExitCode -ne 0) { Write-Error "Self-test failed with exit code $($p.ExitCode)"; exit 1 }
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ui-previews
+          path: previews/
+
+      - name: Publish UI previews
+        if: github.event_name == 'push'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete ui-preview --yes --cleanup-tag 2>$null
+          gh release create ui-preview (Get-ChildItem previews\*.png).FullName `
+            --prerelease --latest=false `
+            --title "UI preview (automatic)" `
+            --notes "Screenshots rendered by the self-test on Windows for commit ${{ github.sha }}."
 
       - name: Package
         shell: pwsh
